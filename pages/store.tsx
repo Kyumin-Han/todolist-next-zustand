@@ -6,6 +6,7 @@ export interface TodoItem {
   id: number
   content: string
   done: boolean
+  deletedAt: Date | null
 }
 
 export interface State {

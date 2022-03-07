@@ -1,16 +1,19 @@
 import type { NextPage } from 'next'
 
 import { FormEvent, useCallback, useState } from 'react'
-import { TodoItem, useStore } from './store'
+import { TodoItem, useStore, State } from './store'
 import { useForm } from 'react-hook-form'
 import produce from 'immer'
 import axios from 'axios'
-import useSWR from 'swr'
+import useSWR, { KeyedMutator, mutate, useSWRConfig } from 'swr'
 
 const client = axios.create({
   baseURL: 'http://localhost:4444',
   withCredentials: true,
 })
+
+const fetcher = (url: string) =>
+  client.request({ url }).then(res => res.data.payload)
 
 // client
 //   .get('/todos')
@@ -35,6 +38,9 @@ const Home: NextPage = () => {
 function TodoList() {
   const [newText, setNewText] = useState('')
   const { handleSubmit, register } = useForm()
+  // const { mutate } = useSWR<TodoItem[]>('/todos', fetcher, {
+  //   refreshInterval: 1000,
+  // })
   const {
     hideCompleted,
     toggleHideCompleted,
@@ -45,7 +51,7 @@ function TodoList() {
 
   function addTodoItem(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    addItem({ id: Date.now(), content: newText, done: false })
+    addItem({ id: Date.now(), content: newText, done: false, deletedAt: null })
     setNewText('')
   }
 
@@ -59,17 +65,10 @@ function TodoList() {
     (data: any) => {
       // addItem({ id: Date.now(), content: newText, done: false })
       // setNewText('')
-      client
-        .post('/todos', { content: newText })
-        .then(res => console.log(res.data.payload))
-    },
-    [newText]
-  )
+      client.post('/todos', { content: newText }).then(res => {
+        mutate('/todos')
+      })
 
-  const addTodoItem2 = useCallback(
-    (e: FormEvent<HTMLFormElement>) => {
-      e.preventDefault()
-      addItem({ id: Date.now(), content: newText, done: false })
       setNewText('')
     },
     [newText]
@@ -126,11 +125,18 @@ function TodoList() {
 
 function List() {
   const { hideCompleted } = useStore()
-  const fetcher = (url: string) => client.get(url).then(res => res.data.payload)
-  const { data } = useSWR<TodoItem[]>('/todos', fetcher)
+
+  const { data: todos, mutate } = useSWR<TodoItem[]>('/todos', fetcher)
+  // mutate(data => {
+  //   if (!data) return []
+  //   return [...data]
+  // })
   return (
     <ul>
-      {data && data.map(li => <ListItem item={li} key={li.id}></ListItem>)}
+      {todos &&
+        todos
+          .filter(li => !li.done || !hideCompleted)
+          .map(li => <ListItem item={li} key={li.id}></ListItem>)}
     </ul>
   )
 }
@@ -140,6 +146,8 @@ function ListItem({ item }: { item: TodoItem }) {
   const { toggleItem, updateItem, removeItem } = useStore()
   const [updateText, setUpdateText] = useState(item.content)
   const [editing, setEditing] = useState(false)
+  const { handleSubmit, register } = useForm()
+  const { mutate } = useSWRConfig()
 
   const onClickEditButton = () => {
     setEditing(true)
@@ -150,59 +158,133 @@ function ListItem({ item }: { item: TodoItem }) {
   }
 
   const onEditSubmit = (id: number) => {
-    updateItem(id, updateText)
-    client.put(`/todos/${id}`, { content: updateText, done: false })
+    // updateItem(id, updateText)
+    client
+      .put(`/todos/${id}`, { content: updateText, done: false })
+      .then(res => {
+        // mutate(data => {
+        //   if (!data) return []
+        //   return [
+        //     produce((draft: State) => {
+        //       draft.items = draft.items.map(
+        //         produce((todoItem: TodoItem) => {
+        //           if (todoItem.id === id) {
+        //             todoItem.content = updateText
+        //           }
+        //         })
+        //       )
+        //     }),
+        //   ]
+        // }, true)
+        mutate(
+          '/todos',
+          produce((draft: TodoItem[]) => {
+            draft = draft.map(
+              produce(item => {
+                if (item.id === id) {
+                  item.content = updateText
+                }
+              })
+            )
+          }),
+          {
+            revalidate: true,
+          }
+        )
+        // mutate()
+      })
+
     // .then(res => console.log(res.data.payload))
     setEditing(false)
   }
 
-  return (
-    <li>
-      <input
-        type="checkbox"
-        checked={item.done}
-        onChange={() =>
-          client
-            .put(`/todos/${item.id}`, {
-              content: item.content,
-              done: !item.done,
-            })
-            .then(res => console.log(res.data.payload))
-        }
-      />
-      {editing ? (
-        <input
-          type="text"
-          className="input input-bordered input-sm"
-          value={updateText}
-          onChange={onUpdate}
-        />
-      ) : (
-        `${item.content}`
-      )}
-
-      {!item.done ? (
-        editing ? (
-          <button type="submit" onClick={() => onEditSubmit(item.id)}>
-            확인
-          </button>
-        ) : (
-          <button type="button" onClick={onClickEditButton}>
-            수정
-          </button>
+  const isChecked = (id: number) => {
+    client
+      .put(`/todos/${id}`, { content: item.content, done: !item.done })
+      .then(res => {
+        mutate(
+          '/todos',
+          produce((draft: TodoItem[]) => {
+            draft = draft.map(
+              produce(item => {
+                if (item.id === id) {
+                  item.done = !item.done
+                }
+              })
+            )
+          }),
+          {
+            revalidate: true,
+          }
         )
-      ) : null}
-      <button
-        onClick={async () =>
-          await client
-            .delete(`/todos/${item.id}`)
-            .then(res => console.log(res.data.payload))
+      })
+  }
+
+  const deleteItem = (id: number) => {
+    client.delete(`/todos/${id}`).then(res => {
+      mutate(
+        '/todos',
+        produce((draft: TodoItem[]) => {
+          mutate(
+            '/todos',
+            produce((draft: TodoItem[]) => {
+              draft = draft.map(
+                produce(item => {
+                  if (item.id === id) {
+                    item.deletedAt = new Date()
+                  }
+                })
+              )
+            }),
+            {
+              revalidate: true,
+            }
+          )
+        }),
+        {
+          revalidate: true,
         }
-        className="delete"
-      >
-        delete
-      </button>
-    </li>
+      )
+    })
+  }
+
+  return (
+    <div>
+      {item.deletedAt === null ? (
+        <li className="flex">
+          <input
+            type="checkbox"
+            checked={item.done}
+            onChange={() => isChecked(item.id)}
+          />
+          {editing ? (
+            <form onSubmit={handleSubmit(() => onEditSubmit(item.id))}>
+              <input
+                type="text"
+                className="input input-bordered input-sm"
+                value={updateText}
+                onChange={onUpdate}
+              />
+            </form>
+          ) : (
+            `${item.content}`
+          )}
+
+          {!item.done ? (
+            editing ? (
+              <button type="submit" onClick={() => onEditSubmit(item.id)}>
+                확인
+              </button>
+            ) : (
+              <button type="button" onClick={onClickEditButton}>
+                수정
+              </button>
+            )
+          ) : null}
+          <button onClick={() => deleteItem(item.id)}>delete</button>
+        </li>
+      ) : null}
+    </div>
   )
 }
 
